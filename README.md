@@ -100,6 +100,54 @@ variables de entorno, nunca en el repositorio, y hacen falta las tres porque hay
 cosas que solo puede hacer cada rol (el estudiante inscribe, el docente
 califica, el administrador cierra).
 
+### Simulación completa (un instituto en marcha)
+
+El seed deja el catálogo, pero el sistema se ve vacío: 4 estudiantes y ninguna
+inscripción en el período abierto. `deploy/simulate.ps1` lo llena, también
+**solo por la API y con el token del rol que corresponde**:
+
+```
+set KEYCLOAK_ADMIN=admin
+set KEYCLOAK_ADMIN_PASSWORD=...     REM admin de la consola de Keycloak
+set SIGA_ADMIN_PASS=...
+set SIGA_TEACHER_PASS=...
+set SIGA_STUDENT_PASS=...
+set SIGA_SIM_PASS=...               REM password de los usuarios que cree
+powershell -ExecutionPolicy Bypass -File deploy\simulate.ps1
+```
+
+Deja esto:
+
+| Período | Estado | Qué hay |
+| --- | --- | --- |
+| 2025-1 | `CERRADO` | 18 secciones, cohorte de 15 en semestre 1, 90 notas. **Lo cierra el script**, así que el historial lo escribió el cierre del sistema, no un `INSERT`. |
+| 2025-2 | `CERRADO` | Lo que dejó `seed.sh`. |
+| 2026-1 | `ABIERTO` | Semestres 1 y 2 de los **tres** planes: 36 secciones, 12 docentes activos, 28 estudiantes, 162 inscripciones y 92 notas puestas. |
+
+Lo que se puede demostrar con esos datos:
+
+- **Docente**: `teacher@siga.cl` queda con una sección cerrada, una a medias y
+  una sin calificar, para mostrar la planilla en los tres estados. El script
+  crea 9 docentes más (12 activos en total, 3 por carrera) y les da cuenta en
+  Keycloak, igual que a los que venían sin usuario: sin token propio un docente
+  no puede calificar, porque el backend lo identifica por el claim `email`.
+- **Repitentes**: 7 estudiantes arrastran asignaturas de 2025-1 y el sistema los
+  obliga a tomarlas antes que las de segundo semestre. A dos de ellos los
+  prerrequisitos les bloquean parte de la oferta, que es la consecuencia
+  correcta de haber reprobado.
+- **Cierre**: `GET /api/academic-periods/2/closure-readiness` responde
+  `canClose=false` con 70 notas pendientes y las 24 asignaturas que lo bloquean.
+- **ELIMINADO**: queda armado y se materializa al cerrar 2026-1 — una estudiante
+  reprobó TCS105 en 2025-1 y vuelve a reprobarla. No cabe en un solo período,
+  porque la regla exige la *segunda* reprobación de la misma asignatura.
+- **EGRESADO** no se puede mostrar con estos datos: egresa quien aprueba las 24
+  asignaturas de su plan y el instituto simulado lleva dos períodos. La regla
+  está implementada y cubierta por los tests.
+
+Es idempotente (volver a correrlo no agrega ni una nota), pero **cerrar 2025-1
+no tiene vuelta** y el historial académico no se borra: es la regla del dominio.
+Para volver a cero, `docker compose down -v` y repetir seed + simulate.
+
 ## CI/CD
 
 `.github/workflows/ci.yml` corre en cada push a `main`, en cada pull request y a

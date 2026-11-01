@@ -10,6 +10,7 @@ perf/users.json
 .env
 .env.local
 .env.*.local
+siga-key.pem
 
 HELP.md
 target/

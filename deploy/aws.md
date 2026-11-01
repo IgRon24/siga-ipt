@@ -166,6 +166,26 @@ docker compose start backend-2
 
 El sistema queda publicado en HTTP sin TLS, así que:
 
+- **Keycloak rechaza el login desde internet por diseño.** El realm trae
+  `"sslRequired": "external"`, el valor por defecto: HTTPS obligatorio salvo
+  para localhost. De ahí el `HTTPS required` del navegador mientras `seed.sh`
+  por `localhost` funciona sin chistar. Hay dos salidas y conviene tener claro
+  el costo de cada una:
+
+  1. **Poner TLS de verdad** (dominio + Let's Encrypt sobre el mismo nginx). No
+     se toca el realm y las credenciales viajan cifradas. Es lo correcto para
+     cualquier cosa que no sea una demo.
+  2. **Bajar la política a `none`**, que es lo que permite demostrar el sistema
+     sobre una IP pública en HTTP. Implica que **las contraseñas viajan en
+     claro**, igual que ya lo hace todo el resto del tráfico de esta demo. Es
+     una decisión conciente de demostración, no un descuido, y no debe quedar
+     así en nada real.
+
+  Si eliges la segunda, se cambia en los dos realms (`siga-realm` para la
+  aplicación y `master` para la consola) desde dentro del contenedor, donde
+  localhost está exento.
+
+
 - **Cambia `KEYCLOAK_ADMIN_PASSWORD`.** La consola de administración de Keycloak
   queda accesible desde internet en `/auth/admin`; con `admin`/`admin` cualquiera
   toma el realm y, con él, todos los roles del sistema.
@@ -190,25 +210,52 @@ mismo nginx). Fuera del alcance de una demo, pero es el siguiente paso natural.
 
 ## 6. Actualizar la demo
 
-Desde tu máquina:
+### Automático, con cada push a `main`
+
+El job `deploy` de `.github/workflows/ci.yml` entra por SSH a la instancia y
+corre `deploy/update.sh`. Va al final de la cadena y **depende de `images`**:
+si las pruebas fallan no se publica nada, y si no se publica nada no se
+despliega nada. Un tag de versión publica imágenes pero no toca la demo.
+
+Necesita tres secretos en el repositorio (`Settings → Secrets and variables →
+Actions`): `EC2_HOST`, `EC2_USER` y `EC2_SSH_KEY` (el contenido completo del
+`.pem`, con sus líneas `BEGIN`/`END`).
+
+Y necesita que el **puerto 22 del security group acepte** a los runners de
+GitHub, que usan IPs dinámicas de Microsoft: en la práctica, `0.0.0.0/0`. El
+acceso sigue siendo solo por llave (Amazon Linux no permite password por SSH),
+pero conviene tenerlo claro y volver a cerrar el 22 a tu IP cuando termine la
+evaluación — el despliegue automático deja de funcionar y se actualiza a mano,
+que es un comando.
+
+### A mano, en cualquier momento
+
+```bash
+cd ~/siga-ipt && git pull && bash deploy/update.sh
+```
+
+`deploy/update.sh` es el mismo script que usa el workflow. Baja las imágenes y
+reemplaza **réplica por réplica**, esperando que cada una quede `healthy` antes
+de tocar la siguiente, así nginx siempre tiene una sana a la que mandar tráfico
+y la demo no se cae durante el despliegue. Al final verifica
+`/actuator/health`. No toca volúmenes: los datos de la demo sobreviven a
+cualquier actualización.
+
+Para desplegar una versión concreta en lugar de `latest`, desde tu máquina:
 
 ```bash
 TAG=1.1.0 docker compose build
 TAG=1.1.0 docker compose push
 ```
 
-En la instancia:
-
-```bash
-cd siga-ipt && git pull
-sed -i 's/^TAG=.*/TAG=1.1.0/' .env
-docker compose pull && docker compose up -d --no-build
-```
+y en la instancia, `sed -i 's/^TAG=.*/TAG=1.1.0/' .env` antes de correr
+`update.sh`.
 
 ## Si algo falla
 
 | Síntoma | Causa |
 | --- | --- |
+| Keycloak responde **`HTTPS required`** al entrar desde el navegador, pero el seed por `localhost` funcionó | el realm viaja con `"sslRequired": "external"`, que es el valor por defecto de Keycloak: exige HTTPS salvo para localhost. Por eso solo falla desde fuera. Ver la sección 5 |
 | Login dice "no se pudo iniciar sesión" y `/auth/realms/siga-realm` da 404 | falta `keycloak/import/siga-realm.json` |
 | Todas las llamadas a la API dan 401 con token válido | `PUBLIC_URL` no coincide con la URL del navegador: el `issuer` del token no es el que valida el backend |
 | `exec format error` al arrancar un contenedor | instancia ARM con imágenes amd64 |

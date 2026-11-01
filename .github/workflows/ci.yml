@@ -3,14 +3,24 @@
 # Las imagenes se publican SOLO si pasan las pruebas y solo desde main o desde
 # un tag de version: un pull request corre todo pero no publica nada.
 #
-# Unico secreto que el repositorio necesita (Settings -> Secrets and variables
+# Secretos que el repositorio necesita (Settings -> Secrets and variables
 # -> Actions -> New repository secret):
 #
 #   DOCKERHUB_TOKEN   access token de Docker Hub con permiso Read & Write
 #                     (Docker Hub -> Account settings -> Personal access tokens)
 #
-# El usuario no es secreto y va abajo como variable, asi aparece en los logs y
-# no se rompe el nombre de la imagen si el secreto falta.
+# Y, solo para el despliegue automatico en EC2:
+#
+#   EC2_HOST          IP elastica o DNS publico de la instancia
+#   EC2_USER          ec2-user en Amazon Linux, ubuntu en Ubuntu
+#   EC2_SSH_KEY       contenido COMPLETO de la llave privada .pem, incluidas
+#                     las lineas -----BEGIN/END ... PRIVATE KEY-----
+#
+# Si esos tres no estan, el job "deploy" falla pero no afecta a las imagenes,
+# que ya quedaron publicadas: el despliegue es el ultimo paso de la cadena.
+#
+# El usuario de Docker Hub no es secreto y va abajo como variable, asi aparece
+# en los logs y no se rompe el nombre de la imagen si el secreto falta.
 
 name: CI
 
@@ -178,4 +188,53 @@ jobs:
             echo '```'
             echo "${{ steps.meta-frontend.outputs.tags }}"
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Desplegar en la demo (EC2)
+    runs-on: ubuntu-latest
+    # Solo si las imagenes se publicaron: desplegar algo que no esta en el
+    # registro dejaria la instancia tirando de una imagen que no existe.
+    needs: [images]
+    # Solo main. Un tag de version publica imagenes pero no toca la demo.
+    if: github.ref == 'refs/heads/main'
+    # Dos pushes seguidos no pueden desplegar a la vez sobre la misma maquina.
+    concurrency:
+      group: deploy-ec2
+      cancel-in-progress: false
+    timeout-minutes: 15
+
+    steps:
+      - name: Actualizar la instancia por SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          # Cualquier comando que falle aborta el job.
+          script_stop: true
+          command_timeout: 12m
+          # git pull primero, porque el propio update.sh puede haber cambiado.
+          # --ff-only: si alguien edito archivos en la instancia, preferimos que
+          # el deploy falle a que se resuelva un merge a ciegas en produccion.
+          script: |
+            cd ~/siga-ipt
+            git pull --ff-only
+            bash deploy/update.sh
+
+      - name: Resumen
+        if: always()
+        run: |
+          {
+            echo "### Despliegue"
+            echo ""
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "La demo quedo actualizada a \`${{ env.DOCKERHUB_USER }}/siga-backend:latest\`."
+            else
+              echo "El despliegue fallo. Las imagenes SI quedaron publicadas:"
+              echo "la instancia se puede actualizar a mano con"
+              echo '```'
+              echo "cd ~/siga-ipt && git pull && bash deploy/update.sh"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
