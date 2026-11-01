@@ -1,0 +1,181 @@
+# Pipeline de SIGA: pruebas -> build -> imagenes en Docker Hub.
+#
+# Las imagenes se publican SOLO si pasan las pruebas y solo desde main o desde
+# un tag de version: un pull request corre todo pero no publica nada.
+#
+# Unico secreto que el repositorio necesita (Settings -> Secrets and variables
+# -> Actions -> New repository secret):
+#
+#   DOCKERHUB_TOKEN   access token de Docker Hub con permiso Read & Write
+#                     (Docker Hub -> Account settings -> Personal access tokens)
+#
+# El usuario no es secreto y va abajo como variable, asi aparece en los logs y
+# no se rompe el nombre de la imagen si el secreto falta.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  JAVA_VERSION: '21'
+  NODE_VERSION: '22'
+  DOCKERHUB_USER: ronaldgarrido24
+
+jobs:
+  backend:
+    name: Backend - pruebas y cobertura
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      # El repositorio se crea desde Windows: el bit de ejecucion del wrapper
+      # puede no viajar en el commit.
+      - name: Permisos del wrapper
+        run: chmod +x mvnw
+        working-directory: backend
+
+      # Primero las unitarias: son rapidas y no necesitan Docker, asi que si
+      # algo basico se rompio el pipeline falla en menos de un minuto.
+      - name: Pruebas unitarias (service layer)
+        run: ./mvnw -B test -Dtest='*ServiceImplTest'
+        working-directory: backend
+
+      # verify corre tambien los 18 escenarios de integracion -que levantan
+      # PostgreSQL con Testcontainers sobre el Docker del runner- y al final el
+      # gate de JaCoCo: falla si la cobertura de service.impl baja del 90%.
+      - name: Pruebas de integracion y gate de cobertura
+        run: ./mvnw -B verify
+        working-directory: backend
+
+      - name: Guardar reportes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-reports
+          path: |
+            backend/target/surefire-reports/
+            backend/target/site/jacoco/
+          retention-days: 14
+          if-no-files-found: warn
+
+  frontend:
+    name: Frontend - lint y build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Instalar dependencias
+        run: npm ci
+        working-directory: frontend
+
+      - name: Lint
+        run: npm run lint
+        working-directory: frontend
+
+      - name: Build de produccion
+        run: npm run build
+        working-directory: frontend
+
+  images:
+    name: Imagenes a Docker Hub
+    runs-on: ubuntu-latest
+    # La publicacion depende de que ambas suites hayan pasado
+    needs: [backend, frontend]
+    # Nunca desde un pull request: solo main y tags de version
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Entrar a Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # latest en main, la version en los tags v*, y siempre el sha del commit
+      # para poder volver a una imagen exacta.
+      - name: Etiquetas del backend
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_USER }}/siga-backend
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - name: Publicar backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          # amd64: es la arquitectura de la instancia EC2 de la demo
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Etiquetas del frontend
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_USER }}/siga-frontend
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      # Las VITE_* se incrustan en el build; los valores por defecto del
+      # Dockerfile (/api y /auth) son los correctos para el despliegue detras
+      # del nginx del borde, asi que no hace falta pasar build args.
+      - name: Publicar frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Resumen
+        run: |
+          {
+            echo "### Imagenes publicadas"
+            echo ""
+            echo "**Backend**"
+            echo '```'
+            echo "${{ steps.meta-backend.outputs.tags }}"
+            echo '```'
+            echo "**Frontend**"
+            echo '```'
+            echo "${{ steps.meta-frontend.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

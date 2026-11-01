@@ -1,0 +1,186 @@
+# SIGA completo: base de datos, Keycloak, dos replicas del backend, dos del
+# frontend y el nginx del borde, en una red interna.
+#
+# El plan de proyecto pide TRES replicas del backend. La tercera esta en
+# docker-compose.three.yml, aparte, porque las tres JVM juntas no caben en
+# cualquier maquina:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.three.yml up -d
+#
+# Del frontend hay dos replicas, aunque el plan pide una sola instancia: son
+# nginx sirviendo el build (~7 MB y nada de CPU cada una), asi que el balanceo
+# del SPA sale casi gratis. Lo que pesa son las replicas del backend.
+#
+#   docker compose up -d --build     levanta todo
+#   http://localhost                 la aplicacion
+#   http://localhost/auth/admin      consola de Keycloak
+#   http://localhost/swagger-ui.html la API
+#
+# El unico servicio con puerto publicado es nginx: el backend y la base de
+# datos solo existen en la red interna, como pide el plan de proyecto.
+#
+# Las credenciales viajan como variables de entorno con valores por defecto de
+# desarrollo. Para un despliegue real, copiar .env.example a .env y cambiarlas.
+
+name: siga
+
+# Configuracion comun de las replicas del backend: misma imagen y mismas
+# variables, lo unico que cambia es el nombre del servicio.
+x-backend: &backend
+  image: ${DOCKERHUB_USER:-local}/siga-backend:${TAG:-latest}
+  build:
+    context: ./backend
+  restart: unless-stopped
+  environment:
+    SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-siga_db}
+    DB_USERNAME: ${POSTGRES_USER:-siga}
+    DB_PASSWORD: ${POSTGRES_PASSWORD:-siga}
+    # Conexiones por replica. El total (replicas x pool) tiene que quedar bajo
+    # el max_connections de Postgres, que son 100: 2x25=50, 3x25=75.
+    SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: ${DB_POOL_SIZE:-25}
+    # El issuer es la URL publica (la que viaja en el token) y las llaves se
+    # piden por la red interna: asi la validacion no depende del DNS externo.
+    SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: ${PUBLIC_URL:-http://localhost}/auth/realms/${KC_REALM:-siga-realm}
+    SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/auth/realms/${KC_REALM:-siga-realm}/protocol/openid-connect/certs
+    SPRING_JPA_SHOW_SQL: "false"
+  expose:
+    - "8080"
+  # Varias JVM en la misma maquina: con el limite y MaxRAMPercentage del
+  # Dockerfile, cada replica se queda en unos 640 MB, asi que el total es
+  # previsible (~2,3 GB con Keycloak y Postgres; ~3 GB con la tercera replica).
+  # Subirlo si la instancia tiene mas memoria.
+  mem_limit: 640m
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 40s
+  networks:
+    - siga-net
+
+# Configuracion comun de las replicas del frontend: una sola imagen, construida
+# con rutas relativas porque el nginx del borde las resuelve en el mismo origen.
+x-frontend: &frontend
+  image: ${DOCKERHUB_USER:-local}/siga-frontend:${TAG:-latest}
+  build:
+    context: ./frontend
+    args:
+      VITE_API_URL: /api
+      VITE_KC_URL: /auth
+      VITE_KC_REALM: ${KC_REALM:-siga-realm}
+      VITE_KC_CLIENT_ID: ${KC_CLIENT_ID:-siga-frontend}
+  restart: unless-stopped
+  expose:
+    - "80"
+  networks:
+    - siga-net
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-siga_db}
+      POSTGRES_USER: ${POSTGRES_USER:-siga}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-siga}
+    volumes:
+      - siga-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-siga} -d ${POSTGRES_DB:-siga_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - siga-net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    restart: unless-stopped
+    # start-dev usa la base interna de Keycloak: alcanza para la evaluacion.
+    # --import-realm carga lo que haya en keycloak/import (ver keycloak/README.md).
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      # Keycloak vive bajo /auth y detras del proxy: con esto el issuer de los
+      # tokens queda en <PUBLIC_URL>/auth/realms/... y coincide con el backend.
+      KC_HTTP_RELATIVE_PATH: /auth
+      # La URL completa incluye la ruta: si se deja solo el host, Keycloak
+      # anuncia los endpoints sin /auth y el issuer deja de calzar con el backend.
+      KC_HOSTNAME: ${PUBLIC_URL:-http://localhost}/auth
+      KC_HOSTNAME_STRICT: "false"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      JAVA_OPTS_APPEND: -XX:MaxRAMPercentage=70
+    mem_limit: 768m
+    volumes:
+      - ./keycloak/import:/opt/keycloak/data/import:ro
+      # Sin este volumen, cada recreacion del contenedor borra los usuarios y
+      # los cambios hechos en la consola: solo volveria lo del import.
+      - siga-keycloak-data:/opt/keycloak/data
+    networks:
+      - siga-net
+
+  # Replicas con nombre propio: el upstream de nginx las lista una por una, asi
+  # el balanceo es explicito y se puede apagar una para probarlo.
+  #
+  #   docker compose stop backend-2    # el sistema sigue respondiendo
+  backend-1:
+    <<: *backend
+    container_name: siga-backend-1
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend-2:
+    <<: *backend
+    container_name: siga-backend-2
+    # Hibernate crea el esquema con ddl-auto=update: la primera replica lo hace
+    # sola y las demas esperan, para no competir por el mismo DDL.
+    depends_on:
+      backend-1:
+        condition: service_healthy
+
+  # Dos replicas del frontend, con nombre propio como las del backend, para que
+  # el upstream las liste y el balanceo del SPA se pueda apagar y demostrar.
+  # Cada una es nginx sirviendo el bundle: ~7 MB y nada de CPU, porque el
+  # navegador lo descarga una vez y desde ahi todo va a /api. El plan de
+  # proyecto pide una unica instancia del frontend.
+  frontend-1:
+    <<: *frontend
+    container_name: siga-frontend-1
+
+  frontend-2:
+    <<: *frontend
+    container_name: siga-frontend-2
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${PUBLIC_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # La lista de replicas del backend, aparte: docker-compose.three.yml monta
+      # aqui upstream-3.conf y agrega la tercera.
+      - ./nginx/upstream-2.conf:/etc/nginx/conf.d/00-upstream.conf:ro
+      - ./nginx/upstream-frontend.conf:/etc/nginx/conf.d/01-upstream-frontend.conf:ro
+    # nginx resuelve los nombres de los upstreams al arrancar: todas las
+    # replicas que esten listadas tienen que existir antes que el.
+    depends_on:
+      - frontend-1
+      - frontend-2
+      - keycloak
+      - backend-1
+      - backend-2
+    networks:
+      - siga-net
+
+volumes:
+  siga-db-data:
+  siga-keycloak-data:
+
+networks:
+  siga-net:
+    driver: bridge

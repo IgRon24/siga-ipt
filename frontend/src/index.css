@@ -1,0 +1,12 @@
+/* CssBaseline de MUI hace el reset; aqui solo lo que queda fuera del tema. */
+
+html,
+body,
+#root {
+    height: 100%;
+}
+
+a {
+    color: inherit;
+    text-decoration: none;
+}

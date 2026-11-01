@@ -1,0 +1,522 @@
+### SIGA IPT - Prueba manual de Epica 3: Asignaturas y prerrequisitos
+### Cliente HTTP de IntelliJ. Ejecuta las peticiones EN ORDEN (boton verde de cada bloque).
+### Los ids se capturan automaticamente, no hay que copiarlos a mano.
+###
+### 1. Levanta la app:  .\mvnw.cmd spring-boot:run   (Postgres + Keycloak arriba)
+### 2. Obten los tokens con las dos peticiones del final del archivo,
+###    o pegalos a mano aqui abajo reemplazando TU-TOKEN-ADMIN / TU-TOKEN-STUDENT.
+###
+### OJO: el codigo de carrera y los codigos de asignatura son unicos en la BD.
+### Para una segunda corrida sin limpiar la BD, cambia @careerCode (5 digitos)
+### y pon algo en @run: los codigos pasan a ser TAP101-b, el plan 2021.3-b, etc.
+
+@baseUrl = http://localhost:8080
+@careerCode = 10450
+@run =
+@adminToken = TU-TOKEN-ADMIN
+@studentToken = TU-TOKEN-STUDENT
+
+### ---------------------------------------------------------------
+### PREPARACION: carrera, plan vigente y asignaturas
+### ---------------------------------------------------------------
+
+### 1. Crear carrera 10450 -> espera 201
+POST {{baseUrl}}/api/careers
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "code": "{{careerCode}}",
+  "name": "Tecnico Analista Programador",
+  "description": "Carrera tecnica de cuatro semestres",
+  "status": "ACTIVA"
+}
+
+> {%
+    client.global.set("careerId", response.body.id);
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 2. Crear plan de estudios 2021.3 VIGENTE -> espera 201
+POST {{baseUrl}}/api/study-plans
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "identifier": "2021.3{{run}}",
+  "name": "Plan de estudios 2021.3",
+  "status": "VIGENTE",
+  "careerId": {{careerId}}
+}
+
+> {%
+    client.global.set("planId", response.body.id);
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 3. Crear asignatura TAP101 (semestre 1) -> espera 201
+POST {{baseUrl}}/api/subjects
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "code": "TAP101{{run}}",
+  "name": "Programacion I",
+  "semester": 1,
+  "telTheory": 2,
+  "telExercises": 2,
+  "telLab": 2,
+  "sct": 5,
+  "studyPlanId": {{planId}}
+}
+
+> {%
+    client.global.set("tap101", response.body.id);
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 4. Crear asignatura TAP201 (semestre 2) -> espera 201
+POST {{baseUrl}}/api/subjects
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "code": "TAP201{{run}}",
+  "name": "Programacion II",
+  "semester": 2,
+  "telTheory": 2,
+  "telExercises": 2,
+  "telLab": 2,
+  "sct": 5,
+  "studyPlanId": {{planId}}
+}
+
+> {%
+    client.global.set("tap201", response.body.id);
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 5. Crear asignatura TAP202 (semestre 2, mismo semestre que TAP201) -> espera 201
+POST {{baseUrl}}/api/subjects
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "code": "TAP202{{run}}",
+  "name": "Bases de Datos",
+  "semester": 2,
+  "telTheory": 2,
+  "telExercises": 2,
+  "telLab": 2,
+  "sct": 5,
+  "studyPlanId": {{planId}}
+}
+
+> {%
+    client.global.set("tap202", response.body.id);
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### ---------------------------------------------------------------
+### CASOS FELICES
+### ---------------------------------------------------------------
+
+### 6. TAP101 (sem 1) como prerrequisito de TAP201 (sem 2) -> espera 201
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": {{tap101}}
+}
+
+> {%
+    client.test("201 Created", () => client.assert(response.status === 201));
+    client.test("devuelve el codigo del prerrequisito", () =>
+        client.assert(response.body.prerequisiteSubjectCode.startsWith("TAP101")));
+%}
+
+### 7. Listar los prerrequisitos de TAP201 -> espera 200 con 1 elemento
+GET {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("200 OK", () => client.assert(response.status === 200));
+    client.test("tiene 1 prerrequisito", () => client.assert(response.body.length === 1));
+%}
+
+### 8. Listar los prerrequisitos de TAP101 -> espera 200 con lista vacia
+GET {{baseUrl}}/api/subjects/{{tap101}}/prerequisites
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("200 OK", () => client.assert(response.status === 200));
+    client.test("lista vacia", () => client.assert(response.body.length === 0));
+%}
+
+### ---------------------------------------------------------------
+### CASOS DE RECHAZO (reglas de negocio -> 409)
+### ---------------------------------------------------------------
+
+### 9. Repetir el mismo prerrequisito -> espera 409 "already has"
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": {{tap101}}
+}
+
+> {%
+    client.test("409 Conflict", () => client.assert(response.status === 409));
+%}
+
+### 10. Prerrequisito del MISMO semestre (TAP202 sem 2 sobre TAP201 sem 2) -> espera 409
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": {{tap202}}
+}
+
+> {%
+    client.test("409 Conflict", () => client.assert(response.status === 409));
+%}
+
+### 11. Prerrequisito de semestre POSTERIOR (TAP201 sem 2 sobre TAP101 sem 1) -> espera 409
+POST {{baseUrl}}/api/subjects/{{tap101}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": {{tap201}}
+}
+
+> {%
+    client.test("409 Conflict", () => client.assert(response.status === 409));
+%}
+
+### 12. Una asignatura como prerrequisito de si misma -> espera 409
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": {{tap201}}
+}
+
+> {%
+    client.test("409 Conflict", () => client.assert(response.status === 409));
+%}
+
+### 13. Prerrequisito inexistente -> espera 404
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": 999999
+}
+
+> {%
+    client.test("404 Not Found", () => client.assert(response.status === 404));
+%}
+
+### 14. Body sin prerequisiteSubjectId -> espera 400 con el mapa de errores por campo
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+}
+
+> {%
+    client.test("400 Bad Request", () => client.assert(response.status === 400));
+%}
+
+### 15. No se puede borrar TAP101 porque es prerrequisito de TAP201 -> espera 409
+DELETE {{baseUrl}}/api/subjects/{{tap101}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("409 Conflict", () => client.assert(response.status === 409));
+%}
+
+### ---------------------------------------------------------------
+### REGLA DE OTRO PLAN DE ESTUDIOS
+### ---------------------------------------------------------------
+
+### 16. Crear un segundo plan 2022.3 en la misma carrera -> espera 201
+POST {{baseUrl}}/api/study-plans
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "identifier": "2022.3{{run}}",
+  "name": "Plan de estudios 2022.3",
+  "status": "NO_VIGENTE",
+  "careerId": {{careerId}}
+}
+
+> {%
+    client.global.set("planId2", response.body.id);
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 17. Asignatura de semestre 1 en el OTRO plan -> espera 201
+POST {{baseUrl}}/api/subjects
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "code": "OTR101{{run}}",
+  "name": "Asignatura de otro plan",
+  "semester": 1,
+  "telTheory": 2,
+  "telExercises": 2,
+  "telLab": 2,
+  "sct": 5,
+  "studyPlanId": {{planId2}}
+}
+
+> {%
+    client.global.set("otherPlanSubject", response.body.id);
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 18. Prerrequisito de otro plan de estudios -> espera 409 "same study plan"
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": {{otherPlanSubject}}
+}
+
+> {%
+    client.test("409 Conflict", () => client.assert(response.status === 409));
+%}
+
+### ---------------------------------------------------------------
+### LIMITE DE 3 PRERREQUISITOS
+### ---------------------------------------------------------------
+
+### 19. Crear TAP102 (semestre 1) -> espera 201
+POST {{baseUrl}}/api/subjects
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "code": "TAP102{{run}}",
+  "name": "Matematica I",
+  "semester": 1,
+  "telTheory": 2,
+  "telExercises": 2,
+  "telLab": 2,
+  "sct": 5,
+  "studyPlanId": {{planId}}
+}
+
+> {%
+    client.global.set("tap102", response.body.id);
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 20. Crear TAP103 (semestre 1) -> espera 201
+POST {{baseUrl}}/api/subjects
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "code": "TAP103{{run}}",
+  "name": "Ingles I",
+  "semester": 1,
+  "telTheory": 2,
+  "telExercises": 2,
+  "telLab": 2,
+  "sct": 5,
+  "studyPlanId": {{planId}}
+}
+
+> {%
+    client.global.set("tap103", response.body.id);
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 21. Crear TAP104 (semestre 1) -> espera 201
+POST {{baseUrl}}/api/subjects
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "code": "TAP104{{run}}",
+  "name": "Algebra I",
+  "semester": 1,
+  "telTheory": 2,
+  "telExercises": 2,
+  "telLab": 2,
+  "sct": 5,
+  "studyPlanId": {{planId}}
+}
+
+> {%
+    client.global.set("tap104", response.body.id);
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 22. Segundo prerrequisito de TAP201 (TAP102) -> espera 201
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": {{tap102}}
+}
+
+> {%
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 23. Tercer prerrequisito de TAP201 (TAP103) -> espera 201 (limite permitido)
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": {{tap103}}
+}
+
+> {%
+    client.test("201 Created", () => client.assert(response.status === 201));
+%}
+
+### 24. Cuarto prerrequisito de TAP201 (TAP104) -> espera 409 "more than 3"
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": {{tap104}}
+}
+
+> {%
+    client.test("409 Conflict", () => client.assert(response.status === 409));
+%}
+
+### 25. Confirmar que TAP201 quedo con exactamente 3 prerrequisitos -> espera 200
+GET {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("200 OK", () => client.assert(response.status === 200));
+    client.test("tiene 3 prerrequisitos", () => client.assert(response.body.length === 3));
+%}
+
+### ---------------------------------------------------------------
+### SEGURIDAD
+### ---------------------------------------------------------------
+
+### 26. STUDENT puede LEER los prerrequisitos -> espera 200
+GET {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{studentToken}}
+
+> {%
+    client.test("200 OK", () => client.assert(response.status === 200));
+%}
+
+### 27. STUDENT NO puede crear prerrequisitos -> espera 403
+POST {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "prerequisiteSubjectId": {{tap104}}
+}
+
+> {%
+    client.test("403 Forbidden", () => client.assert(response.status === 403));
+%}
+
+### 28. STUDENT NO puede borrar prerrequisitos -> espera 403
+DELETE {{baseUrl}}/api/subjects/{{tap201}}/prerequisites/{{tap101}}
+Authorization: Bearer {{studentToken}}
+
+> {%
+    client.test("403 Forbidden", () => client.assert(response.status === 403));
+%}
+
+### 29. Sin token -> espera 401
+GET {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+
+> {%
+    client.test("401 Unauthorized", () => client.assert(response.status === 401));
+%}
+
+### ---------------------------------------------------------------
+### BORRADO
+### ---------------------------------------------------------------
+
+### 30. ADMIN borra el prerrequisito TAP101 de TAP201 -> espera 204
+DELETE {{baseUrl}}/api/subjects/{{tap201}}/prerequisites/{{tap101}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("204 No Content", () => client.assert(response.status === 204));
+%}
+
+### 31. Borrar un prerrequisito que ya no existe -> espera 404
+DELETE {{baseUrl}}/api/subjects/{{tap201}}/prerequisites/{{tap101}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("404 Not Found", () => client.assert(response.status === 404));
+%}
+
+### 32. Ahora TAP101 ya no es prerrequisito de nadie, se puede borrar -> espera 204
+DELETE {{baseUrl}}/api/subjects/{{tap101}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("204 No Content", () => client.assert(response.status === 204));
+%}
+
+### 33. TAP201 quedo con 2 prerrequisitos -> espera 200
+GET {{baseUrl}}/api/subjects/{{tap201}}/prerequisites
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("200 OK", () => client.assert(response.status === 200));
+    client.test("tiene 2 prerrequisitos", () => client.assert(response.body.length === 2));
+%}
+
+### ---------------------------------------------------------------
+### OBTENER TOKENS DE KEYCLOAK (opcional)
+### ---------------------------------------------------------------
+### Reemplaza TU-CLIENT-ID / TU-USUARIO / TU-PASSWORD por los de tu realm.
+### Si el client es confidencial, agrega &client_secret=TU-CLIENT-SECRET.
+### Cada peticion guarda el token en @adminToken / @studentToken automaticamente.
+
+### T1. Token de ADMIN
+POST http://localhost:8081/realms/siga-realm/protocol/openid-connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&client_id=TU-CLIENT-ID&username=TU-USUARIO-ADMIN&password=TU-PASSWORD
+
+> {%
+    client.global.set("adminToken", response.body.access_token);
+%}
+
+### T2. Token de STUDENT
+POST http://localhost:8081/realms/siga-realm/protocol/openid-connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&client_id=TU-CLIENT-ID&username=TU-USUARIO-STUDENT&password=TU-PASSWORD
+
+> {%
+    client.global.set("studentToken", response.body.access_token);
+%}
+
+### T3. Ver los claims y roles del token actual
+GET {{baseUrl}}/api/me
+Authorization: Bearer {{adminToken}}

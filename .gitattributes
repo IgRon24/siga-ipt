@@ -1,0 +1,5 @@
+# El wrapper de Maven es un script de shell: si viaja con CRLF, en Linux
+# (incluida la instancia de AWS y el runner de CI) falla con "bad interpreter".
+backend/mvnw text eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf
