@@ -25,7 +25,7 @@ export default function DashboardPage() {
     return (
         <>
             <PageHeader
-                title={`Hola, ${fullName || username}`}
+                title={`hola mundo, ${fullName || username}`}
                 subtitle="Accesos disponibles para tu rol"
                 action={
                     <Stack direction="row" spacing={1}>
